@@ -1,0 +1,15 @@
+title: Prunio connector read
+description: Exact project read permissions used by the Prunio GCP runtime.
+stage: GA
+includedPermissions:
+  - cloudasset.assets.searchAllResources
+  - compute.commitments.list
+  - compute.disks.list
+  - compute.instances.list
+  - compute.reservations.list
+  - container.clusters.get
+  - container.clusters.list
+  - monitoring.timeSeries.list
+  - recommender.computeInstanceMachineTypeRecommendations.list
+  - resourcemanager.projects.get
+  - serviceusage.services.get

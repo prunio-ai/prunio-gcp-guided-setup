@@ -1,0 +1,16 @@
+artifact-config.json
+print-artifact-digest.sh
+setup.sh
+tutorial.md
+lib/billing-surface.sh
+lib/cleanup-plan.sh
+lib/gcp-resources.sh
+lib/integrity.sh
+lib/naming.sh
+lib/operator-preflight.sh
+lib/registration.sh
+lib/runtime.sh
+permissions/billing-query.yaml
+permissions/connector-optimize.yaml
+permissions/connector-read.yaml
+permissions/required-services.txt

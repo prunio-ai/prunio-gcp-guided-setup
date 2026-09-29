@@ -1,0 +1,6 @@
+title: Prunio connector scoped optimize
+description: Exact reversible GCP actions enabled by the scoped optimize posture.
+stage: GA
+includedPermissions:
+  - compute.instances.start
+  - compute.instances.stop

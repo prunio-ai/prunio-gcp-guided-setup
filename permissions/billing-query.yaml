@@ -1,0 +1,5 @@
+title: Prunio billing query
+description: Allows query jobs without dataset or table mutation permissions.
+stage: GA
+includedPermissions:
+  - bigquery.jobs.create

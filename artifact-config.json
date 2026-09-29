@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/prunio-ai/prunio-gcp-guided-setup.git",
+  "setupContextEndpoint": "https://api.prunio.ai/api/v1/connections/gcp/setup-context",
+  "registrationOrigin": "https://api.prunio.ai",
+  "issuerOrigin": "https://identity.prunio.ai"
+}
