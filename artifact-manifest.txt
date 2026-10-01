@@ -4,9 +4,12 @@ setup.sh
 tutorial.md
 lib/billing-surface.sh
 lib/cleanup-plan.sh
+lib/discovery.sh
 lib/gcp-resources.sh
+lib/google-api.sh
 lib/integrity.sh
 lib/naming.sh
+lib/operator-access.sh
 lib/operator-preflight.sh
 lib/registration.sh
 lib/runtime.sh

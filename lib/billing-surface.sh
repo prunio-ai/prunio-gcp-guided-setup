@@ -6,7 +6,10 @@ inspect_billing_export() {
   if ! bq show --format=prettyjson --dataset_view=METADATA \
     "${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID}" \
     > "$dataset_file" 2>/dev/null; then
-    fail "Detailed billing export dataset is unavailable; configure it in the Cloud Billing console, then rerun"
+    print_billing_export_guidance \
+      "Dataset ${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID} does not exist or cannot be read." \
+      "$BILLING_SOURCE_DATASET_ID"
+    fail "Detailed billing export dataset is unavailable"
   fi
   BILLING_DATASET_LOCATION="$(jq -r '.location // empty' "$dataset_file")"
   [[ -n "$BILLING_DATASET_LOCATION" ]] ||
@@ -14,6 +17,9 @@ inspect_billing_export() {
   if ! bq show --format=prettyjson \
     "${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID}.${RAW_BILLING_EXPORT_TABLE_ID}" \
     > "$table_file" 2>/dev/null; then
+    print_billing_export_guidance \
+      "Dataset ${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID} has no ${RAW_BILLING_EXPORT_TABLE_ID} table yet." \
+      "$BILLING_SOURCE_DATASET_ID"
     fail "Detailed resource-level billing export is not available or is still warming"
   fi
   jq -e --arg project "$BILLING_SOURCE_PROJECT_ID" \

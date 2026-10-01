@@ -22,100 +22,98 @@ ensure_gcloud_authentication() {
 }
 
 collect_customer_inputs() {
-  local configured_project
-  configured_project="$(gcloud config get-value project 2>/dev/null || true)"
-  [[ "$configured_project" != "(unset)" ]] || configured_project=""
-  if [[ -n "$configured_project" ]]; then
-    prompt_with_default TARGET_PROJECT_ID \
-      "Connected GCP project ID" "$configured_project"
-  else
-    prompt_required TARGET_PROJECT_ID "Connected GCP project ID"
-  fi
-  require_match "target project ID" "$TARGET_PROJECT_ID" \
-    '^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
+  select_target_project
+  require_match "target project ID" "$TARGET_PROJECT_ID" "$PROJECT_ID_PATTERN"
+  inspect_target_quota_project
 
-  prompt_required BILLING_ACCOUNT_ID "Billing account ID (XXXXXX-XXXXXX-XXXXXX)"
-  require_match "billing account ID" "$BILLING_ACCOUNT_ID" \
-    '^[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}$'
+  TARGET_PROJECT_NUMBER="$(
+    gcloud_billed_to_target cloudresourcemanager.googleapis.com \
+      projects describe "$TARGET_PROJECT_ID" --format='value(projectNumber)'
+  )" || fail "Target project could not be read"
+  require_match "target project number" "$TARGET_PROJECT_NUMBER" \
+    '^[1-9][0-9]{5,19}$'
+  derive_billing_account
+  set_project_derived_names
+
   prompt_with_default BILLING_SOURCE_PROJECT_ID \
     "Project hosting the detailed billing export" "$TARGET_PROJECT_ID"
   require_match "billing source project ID" "$BILLING_SOURCE_PROJECT_ID" \
-    '^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
-  prompt_required BILLING_SOURCE_DATASET_ID \
-    "Dataset containing the detailed billing export"
+    "$PROJECT_ID_PATTERN"
+  select_billing_export_dataset
   require_match "billing source dataset ID" "$BILLING_SOURCE_DATASET_ID" \
-    '^[A-Za-z_][A-Za-z0-9_]*$'
+    "$DATASET_ID_PATTERN"
   [[ "${#BILLING_SOURCE_DATASET_ID}" -le 1024 ]] ||
     fail "Invalid billing source dataset ID"
   prompt_with_default BILLING_QUERY_PROJECT_ID \
     "Project used for Prunio billing queries" "$TARGET_PROJECT_ID"
   require_match "billing query project ID" "$BILLING_QUERY_PROJECT_ID" \
-    '^[a-z][a-z0-9-]{4,28}[a-z0-9]$'
-
-  TARGET_PROJECT_NUMBER="$(
-    gcloud projects describe "$TARGET_PROJECT_ID" \
-      --format='value(projectNumber)'
-  )" || fail "Target project could not be read"
-  require_match "target project number" "$TARGET_PROJECT_NUMBER" \
-    '^[1-9][0-9]{5,19}$'
-  set_project_derived_names
+    "$PROJECT_ID_PATTERN"
 }
 
-test_project_operator_permissions() {
-  local project_id="$1"
-  shift
-  test_google_permissions \
-    "https://cloudresourcemanager.googleapis.com/v3/projects/${project_id}:testIamPermissions" \
-    "project ${project_id}" "$@"
-}
-
-test_billing_operator_permissions() {
-  test_google_permissions \
-    "https://cloudbilling.googleapis.com/v1/billingAccounts/${BILLING_ACCOUNT_ID}:testIamPermissions" \
-    "billing account ${BILLING_ACCOUNT_ID}" \
-    billing.accounts.get
-}
-
+# test_google_permissions ENDPOINT LABEL QUOTA_SERVICE GRANTED_FILE PERMISSION...
+# Writes the permissions the operator holds to GRANTED_FILE.
 test_google_permissions() {
   local endpoint="$1"
   local resource_label="$2"
-  shift 2
+  local quota_service="$3"
+  local granted_file="$4"
+  shift 4
   local request_file="${RUNTIME_DIR}/permission-request.json"
   local response_file="${RUNTIME_DIR}/permission-response.json"
-  local access_token http_status granted permission missing=0
+  local http_status
 
-  printf '%s\n' "$@" | jq -R . | jq -s '{permissions: .}' > "$request_file"
-  access_token="$(gcloud auth print-access-token 2>/dev/null)" ||
-    fail "Could not obtain a temporary operator access token"
-  http_status="$({
-    printf 'header = "Authorization: Bearer %s"\n' "$access_token"
-    printf 'header = "Content-Type: application/json"\n'
-  } | curl --config - --silent --show-error --proto '=https' --tlsv1.2 \
-    --connect-timeout 5 --max-time 20 --max-filesize 65536 \
-    --request POST --data-binary "@${request_file}" \
-    --output "$response_file" --write-out '%{http_code}' "$endpoint")" ||
+  printf '%s\n' "$@" | jq -R . | jq -s '{permissions: unique}' > "$request_file"
+  http_status="$(google_api_request POST "$endpoint" "$response_file" \
+    "$(quota_project_for "$quota_service")" "$request_file")" ||
     fail "Could not test operator permissions on ${resource_label}"
-  unset access_token
   [[ "$http_status" == "200" ]] ||
-    fail "Permission test was rejected for ${resource_label}"
-  jq -e '.permissions | type == "array"' "$response_file" >/dev/null ||
+    fail "Permission test was rejected for ${resource_label} (HTTP ${http_status}); check that ${ACTIVE_ACCOUNT} can open it"
+  # Google omits an empty permissions list, so a missing key means none held.
+  jq -e '(.permissions // []) | type == "array"' "$response_file" >/dev/null ||
     fail "Permission test returned an invalid response"
-  granted="$(jq -r '.permissions[]' "$response_file")"
-  for permission in "$@"; do
-    if ! grep -Fqx "$permission" <<< "$granted"; then
-      printf '  missing: %s on %s\n' "$permission" "$resource_label" >&2
-      missing=1
-    fi
-  done
-  [[ "$missing" -eq 0 ]] || fail "Operator prerequisites are incomplete"
+  # No blank line: as a grep -f pattern it would match every permission.
+  jq -r '(.permissions // [])[] | strings | select(length > 0)' \
+    "$response_file" > "$granted_file"
 }
 
-verify_operator_prerequisites() {
+# check_project_permissions PROJECT PERMISSION...: records each permission the
+# operator lacks, and whether the operator may change the project's IAM policy.
+check_project_permissions() {
+  local project_id="$1"
+  shift
+  local granted_file="${RUNTIME_DIR}/granted-${project_id}.txt"
+  local missing permission
+  test_google_permissions \
+    "https://cloudresourcemanager.googleapis.com/v3/projects/${project_id}:testIamPermissions" \
+    "project ${project_id}" cloudresourcemanager.googleapis.com \
+    "$granted_file" resourcemanager.projects.setIamPolicy "$@"
+  if grep -Fqx resourcemanager.projects.setIamPolicy "$granted_file"; then
+    printf '%s\n' "$project_id" >> "$SELF_GRANT_PROJECTS_FILE"
+  fi
+  missing="$(printf '%s\n' "$@" | grep -vxF -f "$granted_file" || true)"
+  while IFS= read -r permission; do
+    [[ -z "$permission" ]] ||
+      printf 'project %s %s\n' "$project_id" "$permission" >> "$MISSING_PERMISSIONS_FILE"
+  done <<< "$missing"
+}
+
+check_billing_permissions() {
+  local granted_file="${RUNTIME_DIR}/granted-billing.txt"
+  test_google_permissions \
+    "https://cloudbilling.googleapis.com/v1/billingAccounts/${BILLING_ACCOUNT_ID}:testIamPermissions" \
+    "billing account ${BILLING_ACCOUNT_ID}" cloudbilling.googleapis.com \
+    "$granted_file" billing.accounts.get
+  grep -Fqx billing.accounts.get "$granted_file" ||
+    printf 'billing %s %s\n' "$BILLING_ACCOUNT_ID" billing.accounts.get >> "$MISSING_PERMISSIONS_FILE"
+}
+
+run_permission_preflight() {
   local target_permissions=(
     resourcemanager.projects.get
     resourcemanager.projects.getIamPolicy
     resourcemanager.projects.setIamPolicy
     serviceusage.services.enable
+    serviceusage.services.use
     iam.workloadIdentityPools.create
     iam.workloadIdentityPools.get
     iam.workloadIdentityPools.list
@@ -166,18 +164,33 @@ verify_operator_prerequisites() {
     bigquery.tables.getIamPolicy
     bigquery.tables.setIamPolicy
   )
-  test_project_operator_permissions "$TARGET_PROJECT_ID" \
-    "${target_permissions[@]}"
-  test_project_operator_permissions "$BILLING_QUERY_PROJECT_ID" \
+  MISSING_PERMISSIONS_FILE="${RUNTIME_DIR}/missing-permissions.txt"
+  SELF_GRANT_PROJECTS_FILE="${RUNTIME_DIR}/self-grant-projects.txt"
+  : > "$MISSING_PERMISSIONS_FILE"
+  : > "$SELF_GRANT_PROJECTS_FILE"
+  load_access_token
+  check_project_permissions "$TARGET_PROJECT_ID" "${target_permissions[@]}"
+  check_project_permissions "$BILLING_QUERY_PROJECT_ID" \
     "${query_project_permissions[@]}"
-  test_project_operator_permissions "$BILLING_SOURCE_PROJECT_ID" \
+  check_project_permissions "$BILLING_SOURCE_PROJECT_ID" \
     "${source_project_permissions[@]}"
-  test_billing_operator_permissions
+  check_billing_permissions
+  forget_access_token
+}
+
+verify_operator_prerequisites() {
+  set_operator_member
+  run_permission_preflight
+  [[ -s "$MISSING_PERMISSIONS_FILE" ]] || return 0
+  report_missing_permissions
+  offer_operator_self_grant || fail "Operator prerequisites are incomplete"
+  wait_for_operator_permissions
 }
 
 show_change_summary() {
   log "Review the exact target before approval:"
   printf '  project: %s (%s)\n' "$TARGET_PROJECT_ID" "$TARGET_PROJECT_NUMBER"
+  printf '  billing account: %s\n' "$BILLING_ACCOUNT_ID"
   printf '  WIF pool: %s\n' "$WORKLOAD_IDENTITY_POOL_ID"
   printf '  WIF provider: %s\n' "$WORKLOAD_IDENTITY_PROVIDER_ID"
   printf '  connector service account: %s\n' "$CONNECTOR_SERVICE_ACCOUNT_EMAIL"
@@ -189,4 +202,5 @@ show_change_summary() {
   printf '  scoped billing view: %s:%s.%s\n' \
     "$BILLING_QUERY_PROJECT_ID" "$BILLING_VIEW_DATASET_ID" \
     "$BILLING_SCOPED_VIEW_ID"
+  print_operator_grant_summary
 }
