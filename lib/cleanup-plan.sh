@@ -45,4 +45,19 @@ print_cleanup_plan() {
   printf 'gcloud iam service-accounts delete %q --project=%q\n' \
     "$CONNECTOR_SERVICE_ACCOUNT_EMAIL" "$TARGET_PROJECT_ID"
   printf '\nThe tenant pool is shared by this tenant inside the project and is not included.\n'
+  print_operator_grant_cleanup
+}
+
+# Roles the operator granted to themselves during this run. They are separate
+# from the connector and can be revoked as soon as setup has finished.
+print_operator_grant_cleanup() {
+  local grant
+  [[ "${#OPERATOR_GRANTS[@]}" -gt 0 ]] || return 0
+  printf '\nRoles this setup granted to you (%s) at your request.\n' \
+    "$OPERATOR_MEMBER"
+  printf 'The Prunio connection does not use them. Revoke them once you no longer need them:\n\n'
+  for grant in "${OPERATOR_GRANTS[@]}"; do
+    printf 'gcloud projects remove-iam-policy-binding %q --member=%q --role=%q --condition=None\n' \
+      "${grant%% *}" "$OPERATOR_MEMBER" "${grant#* }"
+  done
 }

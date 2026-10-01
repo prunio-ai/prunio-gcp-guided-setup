@@ -5,10 +5,18 @@ enable_required_services() {
   while IFS= read -r service; do
     [[ -z "$service" ]] || services+=("$service")
   done < "${ROOT}/permissions/required-services.txt"
-  gcloud services enable "${services[@]}" \
+  # The Service Usage API is on by default, so the target can usually carry
+  # this call's quota instead of gcloud's shared, rate-limited client project.
+  if target_quota_ready serviceusage.googleapis.com; then
+    bill_quota_to_target_project
+  fi
+  gcloud_with_rate_limit_retry services enable "${services[@]}" \
     --project="$TARGET_PROJECT_ID" --quiet
+  # Every API this run calls is now enabled on the target project.
+  bill_quota_to_target_project
+  log "Google API quota for the rest of this run is charged to ${TARGET_PROJECT_ID}."
   if [[ "$BILLING_QUERY_PROJECT_ID" != "$TARGET_PROJECT_ID" ]]; then
-    gcloud services enable bigquery.googleapis.com \
+    gcloud_with_rate_limit_retry services enable bigquery.googleapis.com \
       --project="$BILLING_QUERY_PROJECT_ID" --quiet
   fi
 }
