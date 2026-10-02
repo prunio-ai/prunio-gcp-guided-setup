@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Google API access for read-only discovery and permission tests, plus the
-# quota project used for the run.
+# Google API access for read-only discovery and permission tests, the quota
+# project used for the run, and bounded retries for transient Google errors.
 #
 # Quota: by default gcloud's `services`, `projects` and `billing` command groups
 # charge requests to gcloud's shared client project, whose rate limits every
@@ -116,27 +116,109 @@ restore_api_enablement_prompts() {
   unset CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API
 }
 
+# The waits before each retry of a gcloud or bq command that Google refused for
+# a transient reason. Each reason has its own budget, so a command that meets
+# both waits at most the two budgets added together, never their product.
+RATE_LIMIT_RETRY_DELAYS=(5 10 20 40)
+NEW_SERVICE_ACCOUNT_RETRY_DELAYS=(5 10 20 30 30)
+
+google_rate_limited() {
+  grep -Eq 'RATE_LIMIT_EXCEEDED|RESOURCE_EXHAUSTED|HTTPError 429|Quota exceeded' \
+    "$@"
+}
+
+# connector_service_account_not_visible FILE...: succeeds when Google refused
+# the command only because IAM does not show the connector service account
+# yet. A new account can take a minute or two to reach every IAM policy check.
+# Whitespace is ignored because bq wraps its messages at 80 columns, also
+# inside the account email. Matched forms:
+# - gcloud projects / bq add-iam-policy-binding, the account as member:
+#   "Service account EMAIL does not exist."
+# - gcloud iam service-accounts add-iam-policy-binding, the account as
+#   resource: "NOT_FOUND: Unknown service account", a .../serviceAccounts/EMAIL
+#   "does not exist" message, or the PERMISSION_DENIED that Google documents
+#   for a missing account: "Permission 'iam.serviceAccounts.getIamPolicy'
+#   denied on resource (or it may not exist)." The permission preflight has
+#   already confirmed that the operator holds that permission on the project.
+connector_service_account_not_visible() {
+  local text email="$CONNECTOR_SERVICE_ACCOUNT_EMAIL"
+  text="$(cat "$@")"
+  text="${text//[[:space:]]/}"
+  case "$text" in
+    *[Ss]"erviceaccount${email}doesnotexist"* | \
+      *"/serviceAccounts/${email}doesnotexist"* | \
+      *"NOT_FOUND:Unknownserviceaccount"* | \
+      *"Permission"?"iam.serviceAccounts."[gs]"etIamPolicy"?"deniedonresource(oritmaynotexist)"*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# retry_google_command LABEL NEW_SERVICE_ACCOUNT COMMAND ARGS...: runs an
+# idempotent gcloud or bq command. It retries while Google answers HTTP 429
+# and, when NEW_SERVICE_ACCOUNT is 1, while IAM does not show the connector
+# service account yet. Any other error fails at once. Both streams are held in
+# the runtime directory until the command ends: stdout is passed on after a
+# success, and both are replayed to stderr after the final failure (bq prints
+# its errors to stdout).
+retry_google_command() {
+  local label="$1"
+  local new_service_account="$2"
+  shift 2
+  local output_file="${RUNTIME_DIR}/google-command-stdout.txt"
+  local error_file="${RUNTIME_DIR}/google-command-stderr.txt"
+  local rate_limit_retries=0 service_account_retries=0 delay total
+  while true; do
+    if "$@" > "$output_file" 2> "$error_file"; then
+      cat "$error_file" >&2
+      cat "$output_file"
+      return
+    fi
+    if google_rate_limited "$error_file" "$output_file"; then
+      if ((rate_limit_retries == ${#RATE_LIMIT_RETRY_DELAYS[@]})); then
+        cat "$error_file" "$output_file" >&2
+        fail "Google kept rate-limiting ${label}; wait a few minutes, then re-run ./setup.sh"
+      fi
+      delay="${RATE_LIMIT_RETRY_DELAYS[rate_limit_retries]}"
+      rate_limit_retries=$((rate_limit_retries + 1))
+      log "Google rate-limited ${label}; retrying in ${delay}s (attempt $((rate_limit_retries + 1)) of $((${#RATE_LIMIT_RETRY_DELAYS[@]} + 1)))" >&2
+    elif [[ "$new_service_account" == 1 ]] &&
+      connector_service_account_not_visible "$error_file" "$output_file"; then
+      if ((service_account_retries == ${#NEW_SERVICE_ACCOUNT_RETRY_DELAYS[@]})); then
+        cat "$error_file" "$output_file" >&2
+        total=0
+        for delay in "${NEW_SERVICE_ACCOUNT_RETRY_DELAYS[@]}"; do
+          total=$((total + delay))
+        done
+        fail "Google IAM still did not recognize the new service account ${CONNECTOR_SERVICE_ACCOUNT_EMAIL} after ${total}s; this can take a few minutes. Wait, then re-run ./setup.sh"
+      fi
+      delay="${NEW_SERVICE_ACCOUNT_RETRY_DELAYS[service_account_retries]}"
+      service_account_retries=$((service_account_retries + 1))
+      log "Waiting for the new service account to reach Google IAM; retrying in ${delay}s (attempt $((service_account_retries + 1)) of $((${#NEW_SERVICE_ACCOUNT_RETRY_DELAYS[@]} + 1)))" >&2
+    else
+      cat "$error_file" "$output_file" >&2
+      fail "${label} failed"
+    fi
+    sleep "$delay"
+  done
+}
+
 # gcloud_with_rate_limit_retry ARGS...: retries an idempotent gcloud command up
 # to five times with exponential backoff while Google answers HTTP 429.
 gcloud_with_rate_limit_retry() {
-  local error_file="${RUNTIME_DIR}/gcloud-error.txt"
-  local attempt delay=5 max_attempts=5
-  for ((attempt = 1; ; attempt += 1)); do
-    if gcloud "$@" 2> "$error_file"; then
-      cat "$error_file" >&2
-      return
-    fi
-    if ! grep -Eq 'RATE_LIMIT_EXCEEDED|RESOURCE_EXHAUSTED|HTTPError 429|Quota exceeded' \
-      "$error_file"; then
-      cat "$error_file" >&2
-      fail "gcloud $1 $2 failed"
-    fi
-    if ((attempt == max_attempts)); then
-      cat "$error_file" >&2
-      fail "Google kept rate-limiting gcloud $1 $2; wait a few minutes, then re-run ./setup.sh"
-    fi
-    log "Google rate-limited gcloud $1 $2; retrying in ${delay}s (attempt $((attempt + 1)) of ${max_attempts})" >&2
-    sleep "$delay"
-    delay=$((delay * 2))
+  retry_google_command "gcloud $1 $2" 0 gcloud "$@"
+}
+
+# iam_binding_with_retry COMMAND ARGS...: adds an IAM binding that names the
+# connector service account, with gcloud or bq. Besides HTTP 429, it outlasts
+# the minute or two in which IAM may still reject a just-created account as
+# unknown: up to six attempts over 95 seconds.
+iam_binding_with_retry() {
+  local label="$1" argument
+  for argument in "${@:2}"; do
+    label+=" ${argument}"
+    [[ "$argument" != add-iam-policy-binding ]] || break
   done
+  retry_google_command "$label" 1 "$@"
 }
