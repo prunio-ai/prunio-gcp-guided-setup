@@ -10,6 +10,7 @@ enable_required_services() {
   if target_quota_ready serviceusage.googleapis.com; then
     bill_quota_to_target_project
   fi
+  log "Enabling ${#services[@]} Google APIs on ${TARGET_PROJECT_ID}; this usually takes 1-3 minutes..."
   gcloud_with_rate_limit_retry services enable "${services[@]}" \
     --project="$TARGET_PROJECT_ID" --quiet
   # Every API this run calls is now enabled on the target project.
@@ -28,6 +29,9 @@ pool_state() {
       '.[] | select(.name | endswith($suffix)) | .state' | head -n 1
 }
 
+# The mutating gcloud commands below send stdout, which only echoes the
+# resource or its operation, to /dev/null. Their status lines and errors are on
+# stderr and stay visible.
 ensure_workload_identity_pool() {
   local state
   state="$(pool_state)"
@@ -35,7 +39,7 @@ ensure_workload_identity_pool() {
     DELETED)
       gcloud iam workload-identity-pools undelete \
         "$WORKLOAD_IDENTITY_POOL_ID" --location=global \
-        --project="$TARGET_PROJECT_ID" --quiet
+        --project="$TARGET_PROJECT_ID" --quiet >/dev/null
       ;;
     ACTIVE) ;;
     "")
@@ -43,14 +47,14 @@ ensure_workload_identity_pool() {
         "$WORKLOAD_IDENTITY_POOL_ID" --location=global \
         --project="$TARGET_PROJECT_ID" \
         --display-name="Prunio tenant pool" \
-        --description="Prunio tenant ${PUBLIC_TENANT_ID}" --quiet
+        --description="Prunio tenant ${PUBLIC_TENANT_ID}" --quiet >/dev/null
       ;;
     *) fail "WIF pool is in unsupported state: ${state}" ;;
   esac
   gcloud iam workload-identity-pools update "$WORKLOAD_IDENTITY_POOL_ID" \
     --location=global --project="$TARGET_PROJECT_ID" --no-disabled \
     --display-name="Prunio tenant pool" \
-    --description="Prunio tenant ${PUBLIC_TENANT_ID}" --quiet
+    --description="Prunio tenant ${PUBLIC_TENANT_ID}" --quiet >/dev/null
 }
 
 provider_state() {
@@ -77,7 +81,7 @@ ensure_workload_identity_provider() {
     gcloud iam workload-identity-pools providers undelete \
       "$WORKLOAD_IDENTITY_PROVIDER_ID" \
       --workload-identity-pool="$WORKLOAD_IDENTITY_POOL_ID" \
-      --location=global --project="$TARGET_PROJECT_ID" --quiet
+      --location=global --project="$TARGET_PROJECT_ID" --quiet >/dev/null
   elif [[ -n "$state" && "$state" != "ACTIVE" ]]; then
     fail "WIF provider is in unsupported state: ${state}"
   fi
@@ -91,7 +95,7 @@ ensure_workload_identity_provider() {
       --attribute-mapping="$ATTRIBUTE_MAPPING" \
       --attribute-condition="$ATTRIBUTE_CONDITION" \
       --display-name="Prunio connection" \
-      --description="Binding ${CONNECTION_BINDING_ID}" --quiet
+      --description="Binding ${CONNECTION_BINDING_ID}" --quiet >/dev/null
   else
     gcloud iam workload-identity-pools providers update-oidc \
       "$WORKLOAD_IDENTITY_PROVIDER_ID" \
@@ -101,7 +105,7 @@ ensure_workload_identity_provider() {
       --attribute-mapping="$ATTRIBUTE_MAPPING" \
       --attribute-condition="$ATTRIBUTE_CONDITION" \
       --display-name="Prunio connection" \
-      --description="Binding ${CONNECTION_BINDING_ID}" --quiet
+      --description="Binding ${CONNECTION_BINDING_ID}" --quiet >/dev/null
   fi
 }
 
@@ -122,10 +126,11 @@ ensure_custom_role() {
   local role_id="$2"
   local definition="$3"
   local deleted
+  # Role commands print the whole role definition on stdout.
   if gcloud iam roles describe "$role_id" --project="$project_id" \
     --format='value(name)' >/dev/null 2>&1; then
     gcloud iam roles update "$role_id" --project="$project_id" \
-      --file="$definition" --quiet
+      --file="$definition" --quiet >/dev/null
     return
   fi
   deleted="$(gcloud iam roles list --project="$project_id" --show-deleted \
@@ -133,19 +138,20 @@ ensure_custom_role() {
     '.[] | select(.name | endswith($suffix) and .deleted == true) | .name' |
     head -n 1)"
   if [[ -n "$deleted" ]]; then
-    gcloud iam roles undelete "$role_id" --project="$project_id" --quiet
+    gcloud iam roles undelete "$role_id" --project="$project_id" \
+      --quiet >/dev/null
     gcloud iam roles update "$role_id" --project="$project_id" \
-      --file="$definition" --quiet
+      --file="$definition" --quiet >/dev/null
   else
     gcloud iam roles create "$role_id" --project="$project_id" \
-      --file="$definition" --quiet
+      --file="$definition" --quiet >/dev/null
   fi
 }
 
 bind_project_role() {
   local project_id="$1"
   local role_id="$2"
-  gcloud projects add-iam-policy-binding "$project_id" \
+  iam_binding_with_retry gcloud projects add-iam-policy-binding "$project_id" \
     --member="serviceAccount:${CONNECTOR_SERVICE_ACCOUNT_EMAIL}" \
     --role="projects/${project_id}/roles/${role_id}" \
     --condition=None --quiet >/dev/null
@@ -166,7 +172,7 @@ ensure_connector_project_roles() {
 }
 
 ensure_exact_workload_identity_binding() {
-  gcloud iam service-accounts add-iam-policy-binding \
+  iam_binding_with_retry gcloud iam service-accounts add-iam-policy-binding \
     "$CONNECTOR_SERVICE_ACCOUNT_EMAIL" --project="$TARGET_PROJECT_ID" \
     --member="$WIF_PRINCIPAL" --role=roles/iam.workloadIdentityUser \
     --condition=None --quiet >/dev/null
@@ -195,8 +201,10 @@ verify_provider_contract() {
 }
 
 provision_gcp_identity_resources() {
+  log "Creating the workload identity pool and provider..."
   ensure_workload_identity_pool
   ensure_workload_identity_provider
+  log "Creating the connector service account and custom roles..."
   ensure_connector_service_account
   ensure_connector_project_roles
   ensure_exact_workload_identity_binding

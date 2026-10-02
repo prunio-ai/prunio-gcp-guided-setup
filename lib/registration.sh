@@ -29,6 +29,7 @@ post_registration_once() {
 register_connection_coordinates() {
   local response_file="${RUNTIME_DIR}/registration-response.json"
   local http_status attempt
+  log "Registering the connection with Prunio..."
   for attempt in 1 2 3; do
     if http_status="$(post_registration_once "$response_file")"; then
       [[ "$http_status" == "202" ]] ||

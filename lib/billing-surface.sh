@@ -135,10 +135,12 @@ grant_billing_resource_access() {
   local scoped_view=
   source_table="${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID}.${RAW_BILLING_EXPORT_TABLE_ID}"
   scoped_view="${BILLING_QUERY_PROJECT_ID}:${BILLING_VIEW_DATASET_ID}.${BILLING_SCOPED_VIEW_ID}"
-  bq add-iam-policy-binding --table=true --member="$member" \
-    --role=roles/bigquery.metadataViewer "$source_table" >/dev/null
-  bq add-iam-policy-binding --table=true --member="$member" \
-    --role=roles/bigquery.dataViewer "$scoped_view" >/dev/null
+  iam_binding_with_retry bq add-iam-policy-binding --table=true \
+    --member="$member" --role=roles/bigquery.metadataViewer "$source_table" \
+    >/dev/null
+  iam_binding_with_retry bq add-iam-policy-binding --table=true \
+    --member="$member" --role=roles/bigquery.dataViewer "$scoped_view" \
+    >/dev/null
 }
 
 verify_scoped_billing_view() {
@@ -154,6 +156,7 @@ verify_scoped_billing_view() {
 }
 
 provision_billing_surface() {
+  log "Creating the scoped billing view..."
   ensure_billing_view_dataset
   ensure_scoped_billing_view
   authorize_scoped_billing_view
