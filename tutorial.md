@@ -35,11 +35,11 @@ The script looks up the IDs instead of asking you to type them:
   enabled (the first 50 are checked). If there is only one, it is chosen for
   you. You can always type a project ID instead of a number.
 - **Billing account**: read from the chosen project and shown for review.
-- **Billing export**: press Enter to keep the connected project as the export
-  project, or type another. The script then finds the dataset that holds the
-  detailed billing export table and offers it as the default.
-- **Billing query project**: press Enter to keep the connected project, or type
-  another.
+- **Billing export**: found for you. The script looks for the billing
+  account's detailed export table in the connected project and in every other
+  project you can see. Only if it finds none does it ask for the project.
+
+The project-filtered billing view is created in the connected project.
 
 Prunio needs the Cloud Billing **Detailed usage cost** export. If it is
 missing, the script stops before changing anything and prints the exact console

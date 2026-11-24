@@ -99,12 +99,8 @@ prompt_setup_code() {
 }
 
 confirm_project_mutation() {
-  local confirmation
-  printf 'Type the target project ID (%s) to approve these changes: ' \
-    "$TARGET_PROJECT_ID" >&2
-  IFS= read -r confirmation || fail "Confirmation input was interrupted"
-  [[ "$confirmation" == "$TARGET_PROJECT_ID" ]] ||
-    fail "Project confirmation did not match"
+  confirm_default_no "Apply these changes to ${TARGET_PROJECT_ID}?" ||
+    fail "Changes were not approved; nothing was changed"
 }
 
 make_runtime_directory() {
