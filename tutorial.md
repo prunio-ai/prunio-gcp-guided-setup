@@ -1,71 +1,34 @@
 # Prunio GCP keyless connection
 
-## 1. Authenticate this temporary Cloud Shell
+## Connect your project
 
-This repository opens in a temporary Cloud Shell that normally has no Google
-credentials. Check the active identity:
-
-```bash
-gcloud auth list --filter='status:ACTIVE'
-```
-
-If no account is active, run `gcloud auth login`. Use the customer-authorized
-setup identity. Do not use a service-account key.
-
-## 2. Run the reviewed setup
+Type this in the terminal below and press Enter:
 
 ```bash
 ./setup.sh
 ```
 
-The script first verifies this repository, release branch, commit, and
-complete artifact digest. Nothing in Google Cloud changes before that check
-passes.
+Then:
 
-## 3. Paste the setup code
+1. Paste the one-time code from Prunio (input is hidden).
+2. Pick the project to connect.
+3. Read the short summary and answer `y`.
 
-Paste the one-time setup code from Prunio when prompted. Input is hidden and is
-never placed in a URL, a command line, or shell history.
+The script finds your billing export by itself, checks your permissions, and
+changes nothing until you answer `y`. Prunio moves on by itself once it is done.
 
-## 4. Pick from the menus
+## What it creates
 
-The script looks up the IDs instead of asking you to type them:
+One identity pool, one service account, Prunio custom roles and one
+project-filtered billing view in
+the connected project. No keys, no Owner or Editor grants, no organization-level
+changes. Run `./setup.sh --details` to see every resource name before you
+approve.
 
-- **Project**: a numbered list of the projects you can access that have billing
-  enabled (the first 50 are checked). If there is only one, it is chosen for
-  you. You can always type a project ID instead of a number.
-- **Billing account**: read from the chosen project and shown for review.
-- **Billing export**: found for you. The script looks for the billing
-  account's detailed export table in the connected project and in every other
-  project you can see. Only if it finds none does it ask for the project.
+If something is missing (for example the Detailed usage cost billing export),
+the script stops before changing anything and prints the exact steps to fix it.
 
-The project-filtered billing view is created in the connected project.
-
-Prunio needs the Cloud Billing **Detailed usage cost** export. If it is
-missing, the script stops before changing anything and prints the exact console
-steps: Billing > Billing export > BigQuery export > Detailed usage cost. Google
-fills the new table over a few hours; re-run `./setup.sh` once it appears.
-
-The script then checks your permissions. If any are missing, it names the
-predefined role that grants them and prints the exact grant command. If you can
-already change a project's IAM policy, it offers to grant those roles to you.
-That is a separate change, made only when you type `y`. The cleanup plan
-prints the commands that revoke it.
-
-## 5. Review and confirm
-
-The guided setup creates or reconciles one project-scoped Workload Identity
-Federation pool, one provider for this connection binding, one connector service
-account, exact custom roles, and a project-filtered authorized billing view. It
-does not create keys, grant Owner or Editor, change organization/folder IAM, or
-create the Prunio agent identity. Its Google API calls are charged to the
-connected project's quota as soon as the needed APIs are enabled there, not to
-gcloud's shared quota, which is often rate-limited.
-
-Review every derived resource and type the exact target project ID only when the
-scope is correct.
-
-## 6. Wait for Prunio verification
+## After setup
 
 Registration records untrusted coordinates only. It does not mark the
 connection Ready. Prunio must still synchronize the identity binding,
