@@ -41,7 +41,24 @@ finish_setup() {
   exit "$status"
 }
 
+parse_arguments() {
+  SHOW_DETAILS=0
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --details) SHOW_DETAILS=1 ;;
+      -h | --help)
+        printf 'Usage: ./setup.sh [--details]\n'
+        printf '  --details  list every resource name before you approve\n'
+        exit 0
+        ;;
+      *) printf 'Unknown option: %s (try --help)\n' "$1" >&2; exit 2 ;;
+    esac
+    shift
+  done
+}
+
 main() {
+  parse_arguments "$@"
   require_commands git jq curl gcloud bq cmp
   make_runtime_directory
   trap finish_setup EXIT

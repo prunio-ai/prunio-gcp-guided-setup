@@ -200,8 +200,31 @@ verify_operator_prerequisites() {
   wait_for_operator_permissions
 }
 
+# Plain summary for the person approving; --details adds every derived name.
 show_change_summary() {
-  log "Review the exact target before approval:"
+  local access
+  if [[ "$POSTURE" == "read_only" ]]; then
+    access="read-only (Prunio changes nothing)"
+  else
+    access="read, plus fixes you approve, only on resources tagged for Prunio"
+  fi
+  log "Ready to connect ${TARGET_PROJECT_ID}:"
+  printf '  Access:        %s\n' "$access"
+  printf '  Costs from:    %s:%s (only this project'"'"'s rows)\n' \
+    "$BILLING_SOURCE_PROJECT_ID" "$BILLING_SOURCE_DATASET_ID"
+  printf '  Creates:       1 service account, 1 identity pool, Prunio custom roles,\n'
+  printf '                 1 filtered billing view\n'
+  printf '  No keys or passwords. Every change can be removed later.\n'
+  print_operator_grant_summary
+  if [[ "${SHOW_DETAILS:-0}" -eq 1 ]]; then
+    show_change_details
+  else
+    printf '  (Run ./setup.sh --details to see every resource name first.)\n'
+  fi
+}
+
+show_change_details() {
+  log "Every resource this setup creates or updates:"
   printf '  project: %s (%s)\n' "$TARGET_PROJECT_ID" "$TARGET_PROJECT_NUMBER"
   printf '  billing account: %s\n' "$BILLING_ACCOUNT_ID"
   printf '  WIF pool: %s\n' "$WORKLOAD_IDENTITY_POOL_ID"
@@ -215,5 +238,4 @@ show_change_summary() {
   printf '  scoped billing view: %s:%s.%s\n' \
     "$BILLING_QUERY_PROJECT_ID" "$BILLING_VIEW_DATASET_ID" \
     "$BILLING_SCOPED_VIEW_ID"
-  print_operator_grant_summary
 }
