@@ -205,30 +205,28 @@ billing_export_table_state() {
   esac
 }
 
-# Finds the dataset of BILLING_SOURCE_PROJECT_ID holding the detailed export.
-# Stops before any change when every dataset was checked and none has it.
-select_billing_export_dataset() {
-  local project="$BILLING_SOURCE_PROJECT_ID"
+# find_export_datasets PROJECT: sets EXPORT_DATASETS to the datasets of
+# PROJECT holding the detailed export table, and EXPORT_SEARCH (listed,
+# partial or unlisted) to how complete that search was. The caller holds the
+# access token.
+find_export_datasets() {
+  local project="$1"
   local list_file="${RUNTIME_DIR}/datasets.json"
   local quota_project http_status dataset
-  local datasets=() found=()
-  local inconclusive=0
+  local datasets=()
+  EXPORT_DATASETS=()
+  EXPORT_SEARCH="listed"
   quota_project="$(quota_project_for bigquery.googleapis.com)"
-  log "Looking for ${RAW_BILLING_EXPORT_TABLE_ID} in the datasets of ${project}..."
-  load_access_token
   http_status="$(google_api_request GET \
     "https://bigquery.googleapis.com/bigquery/v2/projects/${project}/datasets?maxResults=${DISCOVERY_LIMIT}" \
     "$list_file" "$quota_project")" || http_status=""
   if [[ "$http_status" != "200" ]] ||
     ! jq -e '(.datasets // []) | type == "array"' "$list_file" >/dev/null 2>&1; then
-    forget_access_token
-    log "The datasets of ${project} could not be listed; type the dataset ID instead."
-    prompt_required BILLING_SOURCE_DATASET_ID \
-      "Dataset containing the detailed billing export"
+    EXPORT_SEARCH="unlisted"
     return
   fi
   if jq -e 'has("nextPageToken")' "$list_file" >/dev/null; then
-    inconclusive=1
+    EXPORT_SEARCH="partial"
   fi
   mapfile -t datasets < <(
     jq -r '(.datasets // [])[].datasetReference.datasetId // empty' "$list_file"
@@ -236,12 +234,62 @@ select_billing_export_dataset() {
   for dataset in ${datasets[@]+"${datasets[@]}"}; do
     [[ "$dataset" =~ $DATASET_ID_PATTERN ]] || continue
     case "$(billing_export_table_state "$project" "$dataset" "$quota_project")" in
-      present) found+=("$dataset") ;;
+      present) EXPORT_DATASETS+=("$dataset") ;;
       absent) ;;
-      *) inconclusive=1 ;;
+      *) EXPORT_SEARCH="partial" ;;
     esac
   done
+}
+
+# Finds the detailed export without asking: the connected project first, then
+# every other billing-enabled project the operator can see. Exactly one match
+# is taken as is; several are offered as a menu. Returns 1 when none is found,
+# so the caller falls back to asking for the export project.
+locate_billing_export() {
+  local candidates=("$TARGET_PROJECT_ID") matches=() project dataset choice
+  for project in ${DISCOVERED_PROJECTS[@]+"${DISCOVERED_PROJECTS[@]}"}; do
+    [[ "$project" == "$TARGET_PROJECT_ID" ]] || candidates+=("$project")
+  done
+  log "Looking for the detailed billing export of ${BILLING_ACCOUNT_ID} in ${#candidates[@]} project(s)..."
+  load_access_token
+  for project in "${candidates[@]}"; do
+    find_export_datasets "$project"
+    for dataset in ${EXPORT_DATASETS[@]+"${EXPORT_DATASETS[@]}"}; do
+      matches+=("${project}:${dataset}")
+    done
+  done
   forget_access_token
+  case "${#matches[@]}" in
+    0) return 1 ;;
+    1) choice="${matches[0]}" ;;
+    *)
+      log "Several datasets hold the detailed billing export of ${BILLING_ACCOUNT_ID}:"
+      prompt_choice choice "Billing export to use (number)" "1" '^$' "${matches[@]}"
+      ;;
+  esac
+  BILLING_SOURCE_PROJECT_ID="${choice%%:*}"
+  BILLING_SOURCE_DATASET_ID="${choice#*:}"
+  log "Using the detailed billing export in ${BILLING_SOURCE_PROJECT_ID}:${BILLING_SOURCE_DATASET_ID}."
+}
+
+# Finds the dataset of BILLING_SOURCE_PROJECT_ID holding the detailed export.
+# Stops before any change when every dataset was checked and none has it.
+select_billing_export_dataset() {
+  local project="$BILLING_SOURCE_PROJECT_ID"
+  local found=()
+  local inconclusive=0
+  log "Looking for ${RAW_BILLING_EXPORT_TABLE_ID} in the datasets of ${project}..."
+  load_access_token
+  find_export_datasets "$project"
+  forget_access_token
+  if [[ "$EXPORT_SEARCH" == "unlisted" ]]; then
+    log "The datasets of ${project} could not be listed; type the dataset ID instead."
+    prompt_required BILLING_SOURCE_DATASET_ID \
+      "Dataset containing the detailed billing export"
+    return
+  fi
+  [[ "$EXPORT_SEARCH" == "listed" ]] || inconclusive=1
+  found=(${EXPORT_DATASETS[@]+"${EXPORT_DATASETS[@]}"})
 
   case "${#found[@]}" in
     0)
@@ -257,8 +305,7 @@ select_billing_export_dataset() {
       ;;
     1)
       log "Found the detailed billing export in ${project}:${found[0]}."
-      prompt_with_default BILLING_SOURCE_DATASET_ID \
-        "Dataset containing the detailed billing export" "${found[0]}"
+      BILLING_SOURCE_DATASET_ID="${found[0]}"
       ;;
     *)
       log "Several datasets of ${project} contain ${RAW_BILLING_EXPORT_TABLE_ID}:"

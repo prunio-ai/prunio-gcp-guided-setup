@@ -35,17 +35,23 @@ collect_customer_inputs() {
   derive_billing_account
   set_project_derived_names
 
-  prompt_with_default BILLING_SOURCE_PROJECT_ID \
-    "Project hosting the detailed billing export" "$TARGET_PROJECT_ID"
+  if ! locate_billing_export; then
+    log "The detailed billing export was not found in the projects you can see."
+    prompt_with_default BILLING_SOURCE_PROJECT_ID \
+      "Project hosting the detailed billing export" "$TARGET_PROJECT_ID"
+    require_match "billing source project ID" "$BILLING_SOURCE_PROJECT_ID" \
+      "$PROJECT_ID_PATTERN"
+    select_billing_export_dataset
+  fi
   require_match "billing source project ID" "$BILLING_SOURCE_PROJECT_ID" \
     "$PROJECT_ID_PATTERN"
-  select_billing_export_dataset
   require_match "billing source dataset ID" "$BILLING_SOURCE_DATASET_ID" \
     "$DATASET_ID_PATTERN"
   [[ "${#BILLING_SOURCE_DATASET_ID}" -le 1024 ]] ||
     fail "Invalid billing source dataset ID"
-  prompt_with_default BILLING_QUERY_PROJECT_ID \
-    "Project used for Prunio billing queries" "$TARGET_PROJECT_ID"
+  # The project-filtered billing view and its query cost stay in the
+  # connected project. PRUNIO_BILLING_QUERY_PROJECT overrides it.
+  BILLING_QUERY_PROJECT_ID="${PRUNIO_BILLING_QUERY_PROJECT:-$TARGET_PROJECT_ID}"
   require_match "billing query project ID" "$BILLING_QUERY_PROJECT_ID" \
     "$PROJECT_ID_PATTERN"
 }
@@ -91,6 +97,13 @@ check_project_permissions() {
     printf '%s\n' "$project_id" >> "$SELF_GRANT_PROJECTS_FILE"
   fi
   missing="$(printf '%s\n' "$@" | grep -vxF -f "$granted_file" || true)"
+  # Table create/get/update are not in project IAM for basic Owner: whoever
+  # creates the view dataset becomes its OWNER and gets them there. So when the
+  # operator may create datasets here, those three are not missing.
+  if grep -Fqx bigquery.datasets.create "$granted_file"; then
+    missing="$(printf '%s\n' "$missing" |
+      grep -vxE 'bigquery\.tables\.(create|get|update)' || true)"
+  fi
   while IFS= read -r permission; do
     [[ -z "$permission" ]] ||
       printf 'project %s %s\n' "$project_id" "$permission" >> "$MISSING_PERMISSIONS_FILE"
